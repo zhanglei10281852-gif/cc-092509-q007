@@ -49,7 +49,31 @@ class DisclosureUseCreate(BaseModel):
     recipient_code: str = Field(min_length=2, max_length=100)
     quantity: float = Field(gt=0)
     idempotency_key: str = Field(min_length=4, max_length=100)
+    controlled_copy_id: int | None = Field(default=None, gt=0)
     note: str = Field(default="", max_length=500)
+
+
+class ControlledCopyItem(BaseModel):
+    recipient_code: str = Field(min_length=2, max_length=100)
+    purpose: str = Field(min_length=2, max_length=200)
+    medium: Literal["paper", "electronic"]
+    valid_from: str | None = Field(default=None, min_length=10, max_length=40)
+    valid_until: str = Field(min_length=10, max_length=40)
+
+
+class ControlledCopyBatchIssue(BaseModel):
+    idempotency_key: str = Field(min_length=4, max_length=100)
+    expected_source_version: int | None = Field(default=None, gt=0)
+    copies: list[ControlledCopyItem] = Field(min_length=1, max_length=100)
+    note: str = Field(default="", max_length=500)
+
+
+class ControlledCopyWithdraw(BaseModel):
+    reason: str = Field(min_length=2, max_length=500)
+
+
+class ControlledCopyBatchFreeze(BaseModel):
+    reason: str = Field(min_length=2, max_length=500)
 
 
 class LoanCreate(BaseModel):
@@ -58,6 +82,7 @@ class LoanCreate(BaseModel):
     requester_user_id: int = Field(gt=0)
     quantity: float = Field(gt=0)
     due_at: str = Field(min_length=10, max_length=40)
+    controlled_copy_id: int | None = Field(default=None, gt=0)
 
 
 class LoanReturn(BaseModel):

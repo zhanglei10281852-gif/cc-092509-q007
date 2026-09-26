@@ -11,6 +11,7 @@ from app.core.clock import Clock, SystemClock, to_storage
 from app.core.errors import ConflictError, NotFoundError, ValidationError
 from app.core.security import Principal
 from app.archives.repository import IncidentRepository, ApprovalRepository, IntakeRepository, VaultRepository, DossierRepository
+from app.archives.controlled_copies import ControlledCopyService
 from app.archives.validation import require_code
 from app.services.audit import AuditService
 
@@ -157,6 +158,8 @@ class DossierLifecycleService:
         ).fetchone()
         if existing:
             return {"record": dict(existing), "dossier": self.dossiers.get(dossier_id), "replayed": True}
+        if data.get("controlled_copy_id"):
+            ControlledCopyService(self.connection, self.clock).assert_copy_usable(dossier_id, data["controlled_copy_id"])
         if dossier["quantity"] - dossier["reserved_quantity"] < data["quantity"]:
             raise ConflictError("可用数量不足")
         now = to_storage(self.clock.now())
@@ -164,9 +167,9 @@ class DossierLifecycleService:
         new_state = "disclosed" if updated["quantity"] == 0 else "partially_disclosed"
         updated = self.dossiers.set_state(dossier_id, new_state, updated["version"], now)
         cursor = self.connection.execute(
-            """INSERT INTO disclosure_use_records(dossier_id,recipient_code,quantity,operator_user_id,idempotency_key,occurred_at,note,created_at)
-               VALUES(?,?,?,?,?,?,?,?)""",
-            (dossier_id, data["recipient_code"], data["quantity"], principal.user_id, data["idempotency_key"], now, data.get("note", ""), now),
+            """INSERT INTO disclosure_use_records(dossier_id,recipient_code,quantity,operator_user_id,idempotency_key,controlled_copy_id,occurred_at,note,created_at)
+               VALUES(?,?,?,?,?,?,?,?,?)""",
+            (dossier_id, data["recipient_code"], data["quantity"], principal.user_id, data["idempotency_key"], data.get("controlled_copy_id"), now, data.get("note", ""), now),
         )
         record = dict(self.connection.execute("SELECT * FROM disclosure_use_records WHERE id=?", (cursor.lastrowid,)).fetchone())
         self.dossiers.append_event(dossier_id, "disclosed", principal.user_id, now, quantity_delta=-data["quantity"], from_state=dossier["lifecycle_state"], to_state=new_state, details={"recipient_code": data["recipient_code"]})
@@ -186,14 +189,16 @@ class AccessLoanService:
         dossier = self.dossiers.get(data["dossier_id"])
         if dossier["lifecycle_state"] not in {"available", "partially_disclosed"}:
             raise ConflictError("档案当前不可查阅借阅")
+        if data.get("controlled_copy_id"):
+            ControlledCopyService(self.connection, self.clock).assert_copy_usable(data["dossier_id"], data["controlled_copy_id"])
         if dossier["quantity"] - dossier["reserved_quantity"] < data["quantity"]:
             raise ConflictError("可借数量不足")
         now = to_storage(self.clock.now())
         access_code = data.get("access_code") or f"LOAN-{uuid.uuid4().hex[:12]}"
         cursor = self.connection.execute(
-            """INSERT INTO access_loans(access_code,dossier_id,requester_user_id,quantity,due_at,state,created_at,updated_at)
-               VALUES(?,?,?,?,?,'active',?,?)""",
-            (access_code, data["dossier_id"], data["requester_user_id"], data["quantity"], data["due_at"], now, now),
+            """INSERT INTO access_loans(access_code,dossier_id,requester_user_id,controlled_copy_id,quantity,due_at,state,created_at,updated_at)
+               VALUES(?,?,?,?,?,?,'active',?,?)""",
+            (access_code, data["dossier_id"], data["requester_user_id"], data.get("controlled_copy_id"), data["quantity"], data["due_at"], now, now),
         )
         self.connection.execute(
             "UPDATE dossiers SET reserved_quantity=reserved_quantity+?,lifecycle_state='access_loaned',version=version+1,updated_at=? WHERE id=?",

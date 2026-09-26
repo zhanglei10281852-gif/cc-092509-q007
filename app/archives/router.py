@@ -6,6 +6,9 @@ from app.api.dependencies import current_principal
 from app.database import get_connection, transaction
 from app.core.security import Principal
 from app.archives.schemas import (
+    ControlledCopyBatchFreeze,
+    ControlledCopyBatchIssue,
+    ControlledCopyWithdraw,
     CopyIssueRequest,
     IncidentCreate,
     ApprovalCreate,
@@ -17,6 +20,7 @@ from app.archives.schemas import (
     LocationCreate,
     DossierCreate,
 )
+from app.archives.controlled_copies import ControlledCopyService
 from app.archives.service import IncidentService, ApprovalService, AccessLoanService, VaultService, DossierLifecycleService
 
 router = APIRouter(prefix="/api/dossiers", tags=["知识产权档案"])
@@ -69,6 +73,39 @@ def issue_copy(dossier_id: int, payload: CopyIssueRequest, principal: Principal 
 def disclose(dossier_id: int, payload: DisclosureUseCreate, principal: Principal = Depends(current_principal)):
     with transaction(immediate=True) as connection:
         return DossierLifecycleService(connection).disclose(principal, dossier_id, payload.model_dump())
+
+
+@router.post("/{dossier_id}/controlled-copy-batches", status_code=status.HTTP_201_CREATED)
+def issue_controlled_copy_batch(dossier_id: int, payload: ControlledCopyBatchIssue, principal: Principal = Depends(current_principal)):
+    with transaction(immediate=True) as connection:
+        return ControlledCopyService(connection).issue_batch(principal, dossier_id, payload.model_dump())
+
+
+@router.get("/controlled-copies/list")
+def list_controlled_copies(
+    dossier_id: int | None = Query(default=None),
+    batch_id: int | None = Query(default=None),
+    state: str | None = Query(default=None),
+    principal: Principal = Depends(current_principal),
+):
+    return ControlledCopyService(get_connection()).list_copies(principal, dossier_id=dossier_id, batch_id=batch_id, state=state)
+
+
+@router.get("/controlled-copy-batches/{batch_id}")
+def get_controlled_copy_batch(batch_id: int, principal: Principal = Depends(current_principal)):
+    return ControlledCopyService(get_connection()).get_batch(principal, batch_id)
+
+
+@router.post("/controlled-copy-batches/{batch_id}/freeze")
+def freeze_controlled_copy_batch(batch_id: int, payload: ControlledCopyBatchFreeze, principal: Principal = Depends(current_principal)):
+    with transaction(immediate=True) as connection:
+        return ControlledCopyService(connection).freeze_batch(principal, batch_id, payload.model_dump())
+
+
+@router.post("/controlled-copies/{copy_id}/withdraw")
+def withdraw_controlled_copy(copy_id: int, payload: ControlledCopyWithdraw, principal: Principal = Depends(current_principal)):
+    with transaction(immediate=True) as connection:
+        return ControlledCopyService(connection).withdraw(principal, copy_id, payload.model_dump())
 
 
 @router.post("/access_loans", status_code=status.HTTP_201_CREATED)

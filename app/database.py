@@ -212,12 +212,52 @@ CREATE TABLE IF NOT EXISTS copy_issue_operations (
     created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS controlled_copy_batches (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    batch_code TEXT NOT NULL UNIQUE,
+    source_dossier_id INTEGER NOT NULL REFERENCES dossiers(id),
+    source_version INTEGER NOT NULL,
+    source_snapshot_json TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    request_digest TEXT NOT NULL,
+    state TEXT NOT NULL DEFAULT 'active' CHECK(state IN ('active','frozen')),
+    frozen_at TEXT,
+    frozen_reason TEXT,
+    operator_user_id INTEGER NOT NULL REFERENCES users(id),
+    note TEXT NOT NULL DEFAULT '',
+    version INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(source_dossier_id, idempotency_key)
+);
+
+CREATE TABLE IF NOT EXISTS controlled_copies (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    copy_code TEXT NOT NULL UNIQUE,
+    batch_id INTEGER NOT NULL REFERENCES controlled_copy_batches(id),
+    dossier_id INTEGER NOT NULL REFERENCES dossiers(id),
+    recipient_code TEXT NOT NULL,
+    purpose TEXT NOT NULL,
+    medium TEXT NOT NULL CHECK(medium IN ('paper','electronic')),
+    valid_from TEXT NOT NULL,
+    valid_until TEXT NOT NULL,
+    watermark_json TEXT NOT NULL,
+    state TEXT NOT NULL DEFAULT 'active' CHECK(state IN ('active','withdrawn','frozen')),
+    state_reason TEXT NOT NULL DEFAULT '',
+    state_changed_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_controlled_copies_batch ON controlled_copies(batch_id);
+CREATE INDEX IF NOT EXISTS idx_controlled_copies_dossier ON controlled_copies(dossier_id, state);
+
 CREATE TABLE IF NOT EXISTS access_loans (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     access_code TEXT NOT NULL UNIQUE,
     dossier_id INTEGER NOT NULL REFERENCES dossiers(id),
     requester_user_id INTEGER NOT NULL REFERENCES users(id),
     approved_request_id INTEGER REFERENCES approval_requests(id),
+    controlled_copy_id INTEGER REFERENCES controlled_copies(id),
     quantity REAL NOT NULL CHECK(quantity > 0),
     due_at TEXT NOT NULL,
     returned_quantity REAL NOT NULL DEFAULT 0 CHECK(returned_quantity >= 0),
@@ -235,11 +275,13 @@ CREATE TABLE IF NOT EXISTS disclosure_use_records (
     quantity REAL NOT NULL CHECK(quantity > 0),
     operator_user_id INTEGER NOT NULL REFERENCES users(id),
     idempotency_key TEXT NOT NULL,
+    controlled_copy_id INTEGER REFERENCES controlled_copies(id),
     occurred_at TEXT NOT NULL,
     note TEXT NOT NULL,
     created_at TEXT NOT NULL,
     UNIQUE(dossier_id, idempotency_key)
 );
+
 
 CREATE TABLE IF NOT EXISTS approval_requests (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -348,6 +390,7 @@ PERMISSIONS = [
     ("dossiers.write", "维护档案", "dossiers", "write"),
     ("dossiers.disclose", "登记披露使用", "dossiers", "disclose"),
     ("dossiers.dispose", "执行合规处置", "dossiers", "dispose"),
+    ("controlled_copies.manage", "管理受控副本签发撤回冻结", "controlled_copies", "manage"),
     ("access_loans.manage", "管理查阅借阅", "access_loans", "manage"),
     ("inventory_review.manage", "管理载体盘点", "inventory_review", "manage"),
     ("approvals.decide", "审批高风险操作", "approvals", "decide"),
@@ -401,10 +444,18 @@ def transaction(*, immediate: bool = False) -> Iterator[sqlite3.Connection]:
         connection.commit()
 
 
+def _ensure_column(connection: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
+    existing = {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
+    if column not in existing:
+        connection.execute(f"ALTER TABLE {table} ADD COLUMN {ddl}")
+
+
 def init_db() -> None:
     now = to_storage(utc_now())
     connection = get_connection()
     connection.executescript(SCHEMA)
+    _ensure_column(connection, "access_loans", "controlled_copy_id", "controlled_copy_id INTEGER REFERENCES controlled_copies(id)")
+    _ensure_column(connection, "disclosure_use_records", "controlled_copy_id", "controlled_copy_id INTEGER REFERENCES controlled_copies(id)")
     with transaction(immediate=True) as connection:
         for code, name, resource, action in PERMISSIONS:
             connection.execute(
@@ -432,6 +483,7 @@ def init_db() -> None:
             "dossier_manager": [
                 "dossiers.read", "dossiers.write", "dossiers.disclose", "dossiers.dispose",
                 "access_loans.manage", "inventory_review.manage", "incidents.manage",
+                "controlled_copies.manage",
             ],
             "researcher": ["dossiers.read", "dossiers.disclose"],
             "approver": ["dossiers.read", "approvals.decide"],
