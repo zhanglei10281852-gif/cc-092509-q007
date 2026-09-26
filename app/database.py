@@ -212,10 +212,55 @@ CREATE TABLE IF NOT EXISTS copy_issue_operations (
     created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS controlled_copy_batches (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    batch_code TEXT NOT NULL UNIQUE,
+    dossier_id INTEGER NOT NULL REFERENCES dossiers(id),
+    source_version INTEGER NOT NULL,
+    source_snapshot_json TEXT NOT NULL,
+    snapshot_digest TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    request_digest TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','frozen')),
+    frozen_at TEXT,
+    frozen_by INTEGER REFERENCES users(id),
+    freeze_reason TEXT,
+    operator_user_id INTEGER NOT NULL REFERENCES users(id),
+    note TEXT NOT NULL DEFAULT '',
+    version INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(dossier_id, idempotency_key)
+);
+
+CREATE TABLE IF NOT EXISTS controlled_copies (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    copy_number TEXT NOT NULL UNIQUE,
+    batch_id INTEGER NOT NULL REFERENCES controlled_copy_batches(id),
+    dossier_id INTEGER NOT NULL REFERENCES dossiers(id),
+    recipient TEXT NOT NULL,
+    purpose TEXT NOT NULL,
+    copy_format TEXT NOT NULL CHECK(copy_format IN ('paper','electronic')),
+    watermark_json TEXT NOT NULL,
+    watermark_digest TEXT NOT NULL,
+    valid_from TEXT NOT NULL,
+    valid_until TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','revoked')),
+    revoked_at TEXT,
+    revoked_by INTEGER REFERENCES users(id),
+    revoke_reason TEXT,
+    version INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_controlled_copies_dossier ON controlled_copies(dossier_id, status);
+CREATE INDEX IF NOT EXISTS idx_controlled_copies_batch ON controlled_copies(batch_id);
+
 CREATE TABLE IF NOT EXISTS access_loans (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     access_code TEXT NOT NULL UNIQUE,
     dossier_id INTEGER NOT NULL REFERENCES dossiers(id),
+    controlled_copy_id INTEGER REFERENCES controlled_copies(id),
     requester_user_id INTEGER NOT NULL REFERENCES users(id),
     approved_request_id INTEGER REFERENCES approval_requests(id),
     quantity REAL NOT NULL CHECK(quantity > 0),
@@ -231,6 +276,7 @@ CREATE TABLE IF NOT EXISTS access_loans (
 CREATE TABLE IF NOT EXISTS disclosure_use_records (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     dossier_id INTEGER NOT NULL REFERENCES dossiers(id),
+    controlled_copy_id INTEGER REFERENCES controlled_copies(id),
     recipient_code TEXT NOT NULL,
     quantity REAL NOT NULL CHECK(quantity > 0),
     operator_user_id INTEGER NOT NULL REFERENCES users(id),
@@ -401,10 +447,19 @@ def transaction(*, immediate: bool = False) -> Iterator[sqlite3.Connection]:
         connection.commit()
 
 
+def _ensure_column(connection: sqlite3.Connection, table: str, column: str, definition: str) -> None:
+    """为早期版本创建的数据库补充新增列，保持 init_db 幂等。"""
+    existing = {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
+    if column not in existing:
+        connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
 def init_db() -> None:
     now = to_storage(utc_now())
     connection = get_connection()
     connection.executescript(SCHEMA)
+    _ensure_column(connection, "access_loans", "controlled_copy_id", "INTEGER REFERENCES controlled_copies(id)")
+    _ensure_column(connection, "disclosure_use_records", "controlled_copy_id", "INTEGER REFERENCES controlled_copies(id)")
     with transaction(immediate=True) as connection:
         for code, name, resource, action in PERMISSIONS:
             connection.execute(
